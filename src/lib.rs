@@ -2,24 +2,24 @@
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
 
-use std::mem::MaybeUninit;
 use std::cmp;
+use std::mem::MaybeUninit;
 
 #[derive(Debug)]
-pub struct ReadBuf<'a> {
+pub struct SliceBuf<'a> {
     buf: &'a mut [MaybeUninit<u8>],
     filled: usize,
     initialized: usize,
 }
 
-/// Creates a new `ReadBuf` from a fully initialized slice.
-impl<'a> From<&'a mut [u8]> for ReadBuf<'a> {
+/// Creates a new `SliceBuf` from a fully initialized slice.
+impl<'a> From<&'a mut [u8]> for SliceBuf<'a> {
     #[inline]
-    fn from(slice: &'a mut [u8]) -> ReadBuf<'a> {
+    fn from(slice: &'a mut [u8]) -> SliceBuf<'a> {
         let len = slice.len();
 
-        ReadBuf {
-            //SAFETY: initialized data never becoming uninitialized is an invariant of ReadBuf
+        SliceBuf {
+            //SAFETY: initialized data never becoming uninitialized is an invariant of SliceBuf
             buf: unsafe { (slice as *mut [u8]).as_uninit_slice_mut().unwrap() },
             filled: 0,
             initialized: len,
@@ -27,17 +27,21 @@ impl<'a> From<&'a mut [u8]> for ReadBuf<'a> {
     }
 }
 
-/// Creates a new `ReadBuf` from a fully uninitialized buffer.
+/// Creates a new `SliceBuf` from a fully uninitialized buffer.
 ///
 /// Use `assume_init` if part of the buffer is known to be already initialized.
-impl<'a> From<&'a mut [MaybeUninit<u8>]> for ReadBuf<'a> {
+impl<'a> From<&'a mut [MaybeUninit<u8>]> for SliceBuf<'a> {
     #[inline]
-    fn from(buf: &'a mut [MaybeUninit<u8>]) -> ReadBuf<'a> {
-        ReadBuf { buf, filled: 0, initialized: 0 }
+    fn from(buf: &'a mut [MaybeUninit<u8>]) -> SliceBuf<'a> {
+        SliceBuf {
+            buf,
+            filled: 0,
+            initialized: 0,
+        }
     }
 }
 
-impl<'a> ReadBuf<'a> {
+impl<'a> SliceBuf<'a> {
     /// Returns the total capacity of the buffer.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -62,8 +66,8 @@ impl<'a> ReadBuf<'a> {
     }
 
     #[inline]
-    pub fn unfilled<'b>(&'b mut self) -> ReadCursor<'a, 'b> {
-        ReadCursor { buf: self }
+    pub fn unfilled<'b>(&'b mut self) -> SliceBufCursor<'a, 'b> {
+        SliceBufCursor { buf: self }
     }
 
     /// Clears the buffer, resetting the filled region to empty.
@@ -94,7 +98,7 @@ impl<'a> ReadBuf<'a> {
 
     /// Asserts that the first `n` bytes of the buffer are initialized.
     ///
-    /// `ReadBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
+    /// `SliceBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
     /// bytes than are already known to be initialized.
     ///
     /// # Safety
@@ -108,11 +112,11 @@ impl<'a> ReadBuf<'a> {
 }
 
 #[derive(Debug)]
-pub struct ReadCursor<'a, 'b> {
-    buf: &'b mut ReadBuf<'a>,
+pub struct SliceBufCursor<'a, 'b> {
+    buf: &'b mut SliceBuf<'a>,
 }
 
-impl<'a, 'b> ReadCursor<'a, 'b> {
+impl<'a, 'b> SliceBufCursor<'a, 'b> {
     #[inline]
     fn capacity(&self) -> usize {
         self.buf.capacity() - self.buf.filled
@@ -122,14 +126,20 @@ impl<'a, 'b> ReadCursor<'a, 'b> {
     #[inline]
     pub fn initialized(&self) -> &[u8] {
         //SAFETY: We only slice the initialized part of the buffer, which is always valid
-        unsafe { MaybeUninit::slice_assume_init_ref(&self.buf.buf[self.buf.filled..self.buf.initialized]) }
+        unsafe {
+            MaybeUninit::slice_assume_init_ref(&self.buf.buf[self.buf.filled..self.buf.initialized])
+        }
     }
 
     /// Returns a mutable reference to the initialized portion of the buffer.
     #[inline]
     pub fn initialized_mut(&mut self) -> &mut [u8] {
         //SAFETY: We only slice the initialized part of the buffer, which is always valid
-        unsafe { MaybeUninit::slice_assume_init_mut(&mut self.buf.buf[self.buf.filled..self.buf.initialized]) }
+        unsafe {
+            MaybeUninit::slice_assume_init_mut(
+                &mut self.buf.buf[self.buf.filled..self.buf.initialized],
+            )
+        }
     }
 
     /// Returns a mutable reference to the uninitialized part of the buffer.
@@ -169,7 +179,7 @@ impl<'a, 'b> ReadCursor<'a, 'b> {
 
     /// Asserts that the first `n` unfilled bytes of the buffer are initialized.
     ///
-    /// `ReadBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
+    /// `SliceBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
     /// bytes than are already known to be initialized.
     ///
     /// # Safety
@@ -207,7 +217,7 @@ impl<'a, 'b> ReadCursor<'a, 'b> {
 mod tests {
     use super::*;
 
-    fn read<'a, 'b>(mut buf: ReadCursor<'a, 'b>) -> Result<(), ()> {
+    fn read<'a, 'b>(mut buf: SliceBufCursor<'a, 'b>) -> Result<(), ()> {
         unsafe {
             let raw_buf = buf.as_mut();
             raw_buf[0].write(0);
@@ -222,7 +232,7 @@ mod tests {
     #[test]
     fn it_works() {
         let mut backing = Vec::with_capacity(32);
-        let mut buf: ReadBuf = backing.spare_capacity_mut().into();
+        let mut buf: SliceBuf = backing.spare_capacity_mut().into();
 
         read(buf.unfilled()).unwrap();
 
