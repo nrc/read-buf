@@ -5,34 +5,39 @@
 use std::mem::MaybeUninit;
 use std::cmp;
 
+#[derive(Debug)]
 pub struct ReadBuf<'a> {
     buf: &'a mut [MaybeUninit<u8>],
     filled: usize,
     initialized: usize,
 }
 
-impl<'a> ReadBuf<'a> {
-    /// Creates a new `ReadBuf` from a fully initialized buffer.
+/// Creates a new `ReadBuf` from a fully initialized slice.
+impl<'a> From<&'a mut [u8]> for ReadBuf<'a> {
     #[inline]
-    pub fn new(buf: &'a mut [u8]) -> ReadBuf<'a> {
-        let len = buf.len();
+    fn from(slice: &'a mut [u8]) -> ReadBuf<'a> {
+        let len = slice.len();
 
         ReadBuf {
             //SAFETY: initialized data never becoming uninitialized is an invariant of ReadBuf
-            buf: unsafe { (buf as *mut [u8]).as_uninit_slice_mut().unwrap() },
+            buf: unsafe { (slice as *mut [u8]).as_uninit_slice_mut().unwrap() },
             filled: 0,
             initialized: len,
         }
     }
+}
 
-    /// Creates a new `ReadBuf` from a fully uninitialized buffer.
-    ///
-    /// Use `assume_init` if part of the buffer is known to be already initialized.
+/// Creates a new `ReadBuf` from a fully uninitialized buffer.
+///
+/// Use `assume_init` if part of the buffer is known to be already initialized.
+impl<'a> From<&'a mut [MaybeUninit<u8>]> for ReadBuf<'a> {
     #[inline]
-    pub fn uninit(buf: &'a mut [MaybeUninit<u8>]) -> ReadBuf<'a> {
+    fn from(buf: &'a mut [MaybeUninit<u8>]) -> ReadBuf<'a> {
         ReadBuf { buf, filled: 0, initialized: 0 }
     }
+}
 
+impl<'a> ReadBuf<'a> {
     /// Returns the total capacity of the buffer.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -102,6 +107,7 @@ impl<'a> ReadBuf<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct ReadCursor<'a, 'b> {
     buf: &'b mut ReadBuf<'a>,
 }
@@ -141,8 +147,10 @@ impl<'a, 'b> ReadCursor<'a, 'b> {
     }
 
     /// Increases the size of the filled region of the buffer.
+    ///
+    /// SAEFTY: TODO
     #[inline]
-    pub fn advance(&mut self, n: usize) -> &mut Self {
+    pub unsafe fn advance(&mut self, n: usize) -> &mut Self {
         self.buf.filled += n;
         self.buf.initialized = cmp::max(self.buf.initialized, self.buf.filled);
         self
@@ -200,22 +208,23 @@ mod tests {
     use super::*;
 
     fn read<'a, 'b>(mut buf: ReadCursor<'a, 'b>) -> Result<(), ()> {
-        let init = buf.initialize_to(4);
-        init[1] = 1;
-        init[2] = 2;
-        init[3] = 3;
-        buf.advance(4);
+        unsafe {
+            let raw_buf = buf.as_mut();
+            raw_buf[0].write(0);
+            raw_buf[1].write(1);
+            raw_buf[2].write(2);
+            raw_buf[3].write(3);
+            buf.advance(4);
+        }
         Ok(())
     }
 
     #[test]
     fn it_works() {
         let mut backing = Vec::with_capacity(32);
-        let mut buf = ReadBuf::uninit(backing.spare_capacity_mut());
-        {
-            let cursor = buf.unfilled();
-            read(cursor).unwrap();
-        }
+        let mut buf: ReadBuf = backing.spare_capacity_mut().into();
+
+        read(buf.unfilled()).unwrap();
 
         let len = buf.len();
         unsafe {
