@@ -216,6 +216,7 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Read};
 
     fn read<'a, 'b>(mut buf: SliceBufCursor<'a, 'b>) -> Result<(), ()> {
         unsafe {
@@ -226,6 +227,10 @@ mod tests {
             raw_buf[3].write(3);
             buf.advance(4);
         }
+        Ok(())
+    }
+
+    fn read_buf<'a, 'b, R: Read + ?Sized>(reader: &mut R, mut buf: SliceBufCursor<'a, 'b>) -> io::Result<()> {
         Ok(())
     }
 
@@ -246,5 +251,40 @@ mod tests {
         assert_eq!(backing[1], 1);
         assert_eq!(backing[2], 2);
         assert_eq!(backing[3], 3);
+    }
+
+    fn copy_to<R: Read + ?Sized>(reader: &mut R, mut buf: Vec<u8>) -> io::Result<u64> {
+        let mut len = 0;
+        let mut init = 0;
+
+        loop {
+            let mut slice_buf: SliceBuf = buf.spare_capacity_mut().into();
+
+            // SAFETY: init is either 0 or the initialized_len of the previous iteration
+            unsafe {
+                slice_buf.set_init(init);
+            }
+
+            match read_buf(reader, slice_buf.unfilled()) {
+                Ok(()) => {
+                    let bytes_read = slice_buf.len();
+
+                    if bytes_read == 0 {
+                        return Ok(len);
+                    }
+
+                    init = slice_buf.init_len() - bytes_read;
+
+                    // SAFETY: ReadBuf guarantees all of its filled bytes are init
+                    unsafe { buf.set_len(buf.len() + bytes_read) };
+                    len += bytes_read as u64;
+                    // Read again if the buffer still has enough capacity, as BufWriter itself would do
+                    // This will occur if the reader returns short reads
+                    continue;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
