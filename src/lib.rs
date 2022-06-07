@@ -1,25 +1,28 @@
 #![feature(ptr_as_uninit)]
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
+#![feature(generic_associated_types)]
+
+pub mod owned;
 
 use std::cmp;
 use std::mem::MaybeUninit;
 
 #[derive(Debug)]
-pub struct SliceBuf<'a> {
+pub struct BorrowBuf<'a> {
     buf: &'a mut [MaybeUninit<u8>],
     filled: usize,
     initialized: usize,
 }
 
-/// Creates a new `SliceBuf` from a fully initialized slice.
-impl<'a> From<&'a mut [u8]> for SliceBuf<'a> {
+/// Creates a new `BorrowBuf` from a fully initialized slice.
+impl<'a> From<&'a mut [u8]> for BorrowBuf<'a> {
     #[inline]
-    fn from(slice: &'a mut [u8]) -> SliceBuf<'a> {
+    fn from(slice: &'a mut [u8]) -> BorrowBuf<'a> {
         let len = slice.len();
 
-        SliceBuf {
-            //SAFETY: initialized data never becoming uninitialized is an invariant of SliceBuf
+        BorrowBuf {
+            //SAFETY: initialized data never becoming uninitialized is an invariant of BorrowBuf
             buf: unsafe { (slice as *mut [u8]).as_uninit_slice_mut().unwrap() },
             filled: 0,
             initialized: len,
@@ -27,13 +30,13 @@ impl<'a> From<&'a mut [u8]> for SliceBuf<'a> {
     }
 }
 
-/// Creates a new `SliceBuf` from a fully uninitialized buffer.
+/// Creates a new `BorrowBuf` from a fully uninitialized buffer.
 ///
 /// Use `assume_init` if part of the buffer is known to be already initialized.
-impl<'a> From<&'a mut [MaybeUninit<u8>]> for SliceBuf<'a> {
+impl<'a> From<&'a mut [MaybeUninit<u8>]> for BorrowBuf<'a> {
     #[inline]
-    fn from(buf: &'a mut [MaybeUninit<u8>]) -> SliceBuf<'a> {
-        SliceBuf {
+    fn from(buf: &'a mut [MaybeUninit<u8>]) -> BorrowBuf<'a> {
+        BorrowBuf {
             buf,
             filled: 0,
             initialized: 0,
@@ -41,7 +44,7 @@ impl<'a> From<&'a mut [MaybeUninit<u8>]> for SliceBuf<'a> {
     }
 }
 
-impl<'a> SliceBuf<'a> {
+impl<'a> BorrowBuf<'a> {
     /// Returns the total capacity of the buffer.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -55,19 +58,22 @@ impl<'a> SliceBuf<'a> {
         unsafe { MaybeUninit::slice_assume_init_ref(&self.buf[0..self.filled]) }
     }
 
+    /// Returns the length of the filled part of the buffer.
     #[inline]
     pub fn len(&self) -> usize {
         self.filled
     }
 
+    /// Returns the length of the initialized part of the buffer.
     #[inline]
     pub fn init_len(&self) -> usize {
         self.initialized
     }
 
+    /// Returns a cursor over the unfilled part of the buffer.
     #[inline]
-    pub fn unfilled<'b>(&'b mut self) -> SliceBufCursor<'a, 'b> {
-        SliceBufCursor { buf: self }
+    pub fn unfilled<'b>(&'b mut self) -> BorrowCursor<'a, 'b> {
+        BorrowCursor { buf: self }
     }
 
     /// Clears the buffer, resetting the filled region to empty.
@@ -75,30 +81,13 @@ impl<'a> SliceBuf<'a> {
     /// The number of initialized bytes is not changed, and the contents of the buffer are not modified.
     #[inline]
     pub fn clear(&mut self) -> &mut Self {
-        self.set_filled(0) // The assertion in `set_filled` is optimized out
-    }
-
-    /// Sets the size of the filled region of the buffer.
-    ///
-    /// The number of initialized bytes is not changed.
-    ///
-    /// Note that this can be used to *shrink* the filled region of the buffer in addition to growing it (for
-    /// example, by a `Read` implementation that compresses data in-place).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the filled region of the buffer would become larger than the initialized region.
-    #[inline]
-    pub fn set_filled(&mut self, n: usize) -> &mut Self {
-        assert!(n <= self.initialized);
-
-        self.filled = n;
+        self.filled = 0;
         self
     }
 
     /// Asserts that the first `n` bytes of the buffer are initialized.
     ///
-    /// `SliceBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
+    /// `BorrowBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
     /// bytes than are already known to be initialized.
     ///
     /// # Safety
@@ -111,20 +100,31 @@ impl<'a> SliceBuf<'a> {
     }
 }
 
+/// A cursor view of a [`BorrowBuf`](BorrowBuf).
+///
+/// Provides mutable access to the unfilled portion (both initialised and uninitialised data) from
+/// the buffer.
 #[derive(Debug)]
-pub struct SliceBufCursor<'a, 'b> {
-    buf: &'b mut SliceBuf<'a>,
+pub struct BorrowCursor<'a, 'b> {
+    buf: &'b mut BorrowBuf<'a>,
 }
 
-impl<'a, 'b> SliceBufCursor<'a, 'b> {
+impl<'a, 'b> BorrowCursor<'a, 'b> {
+    fn plone<'c>(&'c mut self) -> BorrowCursor<'a, 'c> {
+        BorrowCursor {
+            buf: self.buf,
+        }
+    }
+
+    /// Returns the available space in the cursor.
     #[inline]
-    fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.buf.capacity() - self.buf.filled
     }
 
     /// Returns a shared reference to the initialized portion of the buffer.
     #[inline]
-    pub fn initialized(&self) -> &[u8] {
+    pub fn init_ref(&self) -> &[u8] {
         //SAFETY: We only slice the initialized part of the buffer, which is always valid
         unsafe {
             MaybeUninit::slice_assume_init_ref(&self.buf.buf[self.buf.filled..self.buf.initialized])
@@ -133,7 +133,7 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
 
     /// Returns a mutable reference to the initialized portion of the buffer.
     #[inline]
-    pub fn initialized_mut(&mut self) -> &mut [u8] {
+    pub fn init_mut(&mut self) -> &mut [u8] {
         //SAFETY: We only slice the initialized part of the buffer, which is always valid
         unsafe {
             MaybeUninit::slice_assume_init_mut(
@@ -146,11 +146,11 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
     ///
     /// It is safe to uninitialize any of these bytes.
     #[inline]
-    pub fn uninitialized_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+    pub fn uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         &mut self.buf.buf[self.buf.initialized..]
     }
 
-    /// TODO docs
+    /// A view of the cursor as a mutable slice of `MaybeUninit<u8>`.
     #[inline]
     pub unsafe fn as_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         &mut self.buf.buf[self.buf.filled..]
@@ -158,7 +158,10 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
 
     /// Increases the size of the filled region of the buffer.
     ///
-    /// SAEFTY: TODO
+    /// # Safety
+    ///
+    /// The caller must ensure that the first `n` elements of the cursor have been properly
+    /// initialised.
     #[inline]
     pub unsafe fn advance(&mut self, n: usize) -> &mut Self {
         self.buf.filled += n;
@@ -166,10 +169,10 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
         self
     }
 
-    /// TODO docs
+    /// Initialised all bytes in the cursor.
     #[inline]
     pub fn ensure_init(&mut self) -> &mut Self {
-        for byte in self.uninitialized_mut() {
+        for byte in self.uninit_mut() {
             byte.write(0);
         }
         self.buf.initialized = self.buf.capacity();
@@ -177,25 +180,25 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
         self
     }
 
-    /// Asserts that the first `n` unfilled bytes of the buffer are initialized.
+    /// Asserts that the first `n` unfilled bytes of the cursor are initialized.
     ///
-    /// `SliceBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
+    /// `BorrowBuf` assumes that bytes are never de-initialized, so this method does nothing when called with fewer
     /// bytes than are already known to be initialized.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the first `n` unfilled bytes of the buffer have already been initialized.
+    /// The caller must ensure that the first `n` bytes of the buffer have already been initialized.
     #[inline]
-    pub unsafe fn assume_init(&mut self, n: usize) -> &mut Self {
+    pub unsafe fn set_init(&mut self, n: usize) -> &mut Self {
         self.buf.initialized = cmp::max(self.buf.initialized, self.buf.filled + n);
         self
     }
 
-    /// Appends data to the buffer, advancing the written position and possibly also the initialized position.
+    /// Appends data to the cursor, advancing the position within its buffer.
     ///
     /// # Panics
     ///
-    /// Panics if `self.unfilled().len()` is less than `buf.len()`.
+    /// Panics if `self.capacity()` is less than `buf.len()`.
     #[inline]
     pub fn append(&mut self, buf: &[u8]) {
         assert!(self.capacity() >= buf.len());
@@ -207,7 +210,7 @@ impl<'a, 'b> SliceBufCursor<'a, 'b> {
 
         // SAFETY: We just added the entire contents of buf to the filled section.
         unsafe {
-            self.assume_init(buf.len());
+            self.set_init(buf.len());
         }
         self.buf.filled += buf.len();
     }
@@ -218,7 +221,7 @@ mod tests {
     use super::*;
     use std::io::{self, Read};
 
-    fn read<'a, 'b>(mut buf: SliceBufCursor<'a, 'b>) -> Result<(), ()> {
+    fn read<'a, 'b>(mut buf: BorrowCursor<'a, 'b>) -> Result<(), ()> {
         unsafe {
             let raw_buf = buf.as_mut();
             raw_buf[0].write(0);
@@ -230,14 +233,17 @@ mod tests {
         Ok(())
     }
 
-    fn read_buf<'a, 'b, R: Read + ?Sized>(reader: &mut R, mut buf: SliceBufCursor<'a, 'b>) -> io::Result<()> {
+    fn read_buf<'a, 'b, R: Read + ?Sized>(reader: &mut R, mut buf: BorrowCursor<'a, 'b>) -> io::Result<()> {
+        let p = buf.plone();
+        read(p).unwrap();
+        read(buf).unwrap();
         Ok(())
     }
 
     #[test]
     fn it_works() {
         let mut backing = Vec::with_capacity(32);
-        let mut buf: SliceBuf = backing.spare_capacity_mut().into();
+        let mut buf: BorrowBuf = backing.spare_capacity_mut().into();
 
         read(buf.unfilled()).unwrap();
 
@@ -253,37 +259,27 @@ mod tests {
         assert_eq!(backing[3], 3);
     }
 
-    fn copy_to<R: Read + ?Sized>(reader: &mut R, mut buf: Vec<u8>) -> io::Result<u64> {
+    fn copy_to<R: Read + ?Sized>(reader: &mut R, mut buf: Vec<u8>) -> io::Result<usize> {
+        let mut slice_buf: BorrowBuf = buf.spare_capacity_mut().into();
         let mut len = 0;
-        let mut init = 0;
 
         loop {
-            let mut slice_buf: SliceBuf = buf.spare_capacity_mut().into();
-
-            // SAFETY: init is either 0 or the initialized_len of the previous iteration
-            unsafe {
-                slice_buf.set_init(init);
-            }
-
             match read_buf(reader, slice_buf.unfilled()) {
                 Ok(()) => {
-                    let bytes_read = slice_buf.len();
+                    let old_len = len;
+                    len = slice_buf.len();
 
-                    if bytes_read == 0 {
+                    if len == old_len {
+                        unsafe { buf.set_len(buf.len() + len) };
                         return Ok(len);
                     }
 
-                    init = slice_buf.init_len() - bytes_read;
-
-                    // SAFETY: ReadBuf guarantees all of its filled bytes are init
-                    unsafe { buf.set_len(buf.len() + bytes_read) };
-                    len += bytes_read as u64;
-                    // Read again if the buffer still has enough capacity, as BufWriter itself would do
-                    // This will occur if the reader returns short reads
-                    continue;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    unsafe { buf.set_len(buf.len() + len) };
+                    return Err(e)
+                }
             }
         }
     }
