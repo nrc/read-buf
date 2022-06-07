@@ -111,9 +111,7 @@ pub struct BorrowCursor<'a, 'b> {
 
 impl<'a, 'b> BorrowCursor<'a, 'b> {
     fn plone<'c>(&'c mut self) -> BorrowCursor<'a, 'c> {
-        BorrowCursor {
-            buf: self.buf,
-        }
+        BorrowCursor { buf: self.buf }
     }
 
     /// Returns the available space in the cursor.
@@ -233,7 +231,10 @@ mod tests {
         Ok(())
     }
 
-    fn read_buf<'a, 'b, R: Read + ?Sized>(reader: &mut R, mut buf: BorrowCursor<'a, 'b>) -> io::Result<()> {
+    fn read_buf<'a, 'b, R: Read + ?Sized>(
+        reader: &mut R,
+        mut buf: BorrowCursor<'a, 'b>,
+    ) -> io::Result<()> {
         let p = buf.plone();
         read(p).unwrap();
         read(buf).unwrap();
@@ -273,12 +274,11 @@ mod tests {
                         unsafe { buf.set_len(buf.len() + len) };
                         return Ok(len);
                     }
-
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => {
                     unsafe { buf.set_len(buf.len() + len) };
-                    return Err(e)
+                    return Err(e);
                 }
             }
         }

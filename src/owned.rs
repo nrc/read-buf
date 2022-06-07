@@ -2,7 +2,9 @@ use std::cmp;
 use std::mem::MaybeUninit;
 
 pub trait OwnedBuf {
-    type Cursor<'b>: OwnedCursor<'b> where Self: 'b;
+    type Cursor<'b>: OwnedCursor<'b>
+    where
+        Self: 'b;
 
     /// Returns the total capacity of the buffer.
     fn capacity(&self) -> usize;
@@ -41,12 +43,10 @@ pub trait OwnedCursor<'a> {
     /// Since a cursor maintains unique access to its underlying buffer, the cloned cursor is not
     /// accessible while the clone is alive.
     // TODO really don't want a dyn here, but not clear what static type I can use? I want `Self['c/'a]`
-    fn clone<'c>(&'c mut self) -> Box<dyn OwnedCursor<'c>>;
+    fn clone<'c>(&'c mut self) -> Box<dyn OwnedCursor<'c> + 'c>;
 
     /// Returns the available space in the cursor.
-    fn capacity(&self) -> usize {
-        self.buf.capacity() - self.buf.filled
-    }
+    fn capacity(&self) -> usize;
 
     /// Returns the number of bytes written to this cursor since it was created from a `BorrowBuf`.
     ///
@@ -55,7 +55,8 @@ pub trait OwnedCursor<'a> {
     fn written(&self) -> usize;
 
     /// Returns a shared reference to the initialized portion of the cursor.
-    fn init_ref(&self) -> &[u8];
+    // TODO shouldn't need mut self, but Vec does not have an immutable version of spare_capacity_mut
+    fn init_ref(&mut self) -> &[u8];
 
     /// Returns a mutable reference to the initialized portion of the cursor.
     fn init_mut(&mut self) -> &mut [u8];
@@ -82,10 +83,10 @@ pub trait OwnedCursor<'a> {
     ///
     /// The caller must ensure that the first `n` bytes of the cursor have been properly
     /// initialised.
-    unsafe fn advance(&mut self, n: usize) -> &mut Self;
+    unsafe fn advance(&mut self, n: usize);
 
     /// Initializes all bytes in the cursor.
-    fn ensure_init(&mut self) -> &mut Self;
+    fn ensure_init(&mut self);
 
     /// Asserts that the first `n` unfilled bytes of the cursor are initialized.
     ///
@@ -95,7 +96,7 @@ pub trait OwnedCursor<'a> {
     /// # Safety
     ///
     /// The caller must ensure that the first `n` bytes of the buffer have already been initialized.
-    unsafe fn set_init(&mut self, n: usize) -> &mut Self;
+    unsafe fn set_init(&mut self, n: usize);
 
     /// Appends data to the cursor, advancing position within its buffer.
     ///
@@ -146,19 +147,19 @@ impl OwnedBuf for Vec<u8> {
 }
 
 pub struct VecCursor<'a> {
-    buf: &'a Vec<u8>,
+    buf: &'a mut Vec<u8>,
     // relative to len of buf (not 0)
     initialized: usize,
     start: usize,
 }
 
 impl<'a> OwnedCursor<'a> for VecCursor<'a> {
-    fn clone<'c>(&'c mut self) -> VecCursor<'c> {
-        VecCursor {
+    fn clone<'c>(&'c mut self) -> Box<dyn OwnedCursor<'c> + 'c> {
+        Box::new(VecCursor {
             buf: self.buf,
             initialized: self.initialized,
             start: self.start,
-        }
+        })
     }
 
     fn capacity(&self) -> usize {
@@ -169,12 +170,18 @@ impl<'a> OwnedCursor<'a> for VecCursor<'a> {
         self.buf.len() - self.start
     }
 
-    fn init_ref(&self) -> &[u8] {
-        MaybeUninit::slice_assume_init_ref(&self.buf.spare_capacity_mut()[..self.initialized])
+    fn init_ref(&mut self) -> &[u8] {
+        unsafe {
+            MaybeUninit::slice_assume_init_ref(&self.buf.spare_capacity_mut()[..self.initialized])
+        }
     }
 
     fn init_mut(&mut self) -> &mut [u8] {
-        MaybeUninit::slice_assume_init_mut(&mut self.buf.spare_capacity_mut()[..self.initialized])
+        unsafe {
+            MaybeUninit::slice_assume_init_mut(
+                &mut self.buf.spare_capacity_mut()[..self.initialized],
+            )
+        }
     }
 
     fn uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
@@ -185,23 +192,20 @@ impl<'a> OwnedCursor<'a> for VecCursor<'a> {
         self.buf.spare_capacity_mut()
     }
 
-    unsafe fn advance(&mut self, n: usize) -> &mut Self {
-        let len = self.len();
-        self.set_len(len + n);
-        self
+    unsafe fn advance(&mut self, n: usize) {
+        let len = self.buf.len();
+        self.buf.set_len(len + n);
     }
 
-    fn ensure_init(&mut self) -> &mut Self {
+    fn ensure_init(&mut self) {
         for byte in self.uninit_mut() {
             byte.write(0);
         }
 
         self.initialized = self.buf.capacity();
-
-        self
     }
 
-    unsafe fn set_init(&mut self, n: usize) -> &mut Self {
+    unsafe fn set_init(&mut self, n: usize) {
         self.initialized = cmp::max(self.initialized, n);
     }
 
